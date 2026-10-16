@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2/caddytest"
 )
@@ -833,7 +834,31 @@ func TestReverseProxySNIPlaceHolder(t *testing.T) {
 		}
 
 		req.Header.Set("X-SNI", "example.com")
-		tester.AssertResponse(req, 200, "example.com")
+		// auto-HTTPS certificate issuance runs asynchronously and may not be
+		// finished right after the config is loaded; retry until certs are ready
+		var resp *http.Response
+		for try := 0; try < 50; try++ {
+			var err error
+			resp, err = tester.Client.Do(req) //nolint:gosec // no SSRFs demonstrated
+			if err == nil && resp.StatusCode == http.StatusOK {
+				break
+			}
+			if resp != nil {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				resp = nil
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if resp == nil {
+			t.Errorf("requesting %q never succeeded within retry window", req.URL.RequestURI())
+			continue
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != "example.com" {
+			t.Errorf("requesting \"%s\" expected response body \"%s\" but got \"%s\"", req.RequestURI, "example.com", string(body))
+		}
 	}
 }
 
